@@ -1,0 +1,14 @@
+node_modules/
+dist/
+data/
+uploads/
+integration-test.pdf
+.env
+.env.*
+!.env.example
+.netlify/
+.npm-cache/
+.tools/
+*.png
+*.pdf
+audit/

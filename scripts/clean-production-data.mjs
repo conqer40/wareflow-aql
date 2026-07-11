@@ -1,0 +1,10 @@
+import { DatabaseSync } from "node:sqlite";
+import fs from "node:fs";
+import path from "node:path";
+const root=path.resolve(import.meta.dirname,"..");
+const db=new DatabaseSync(path.join(root,"data","wareflow.db"));
+db.exec("BEGIN; DELETE FROM attachments; DELETE FROM approvals; DELETE FROM audit_log; DELETE FROM documents; DELETE FROM stock; DELETE FROM users WHERE role <> 'SUPER_ADMIN'; COMMIT;");
+const dir=path.join(root,"uploads");
+if(fs.existsSync(dir)) for(const file of fs.readdirSync(dir)) fs.rmSync(path.join(dir,file),{force:true});
+const result={users:db.prepare("SELECT COUNT(*) n FROM users").get().n,documents:db.prepare("SELECT COUNT(*) n FROM documents").get().n,stock:db.prepare("SELECT COUNT(*) n FROM stock").get().n,audit:db.prepare("SELECT COUNT(*) n FROM audit_log").get().n};
+console.log(JSON.stringify(result)); db.close();
