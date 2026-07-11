@@ -54,6 +54,7 @@ function downloadCsv(name, rows) {
 }
 
 async function api(path, options={}) {
+  if (location.hostname.endsWith("github.io") || import.meta.env.VITE_STATIC_API === "true") return localApi(path, options);
   const token=localStorage.getItem("wareflow_token");
   const res=await fetch(`/api${path}`,{...options,headers:{"Content-Type":"application/json",...(token?{Authorization:`Bearer ${token}`}:{ }),...(options.headers||{})}});
   const body=await res.json().catch(()=>({})); if(!res.ok)throw new Error(body.error||"تعذر الاتصال بالخادم"); return body;
@@ -186,4 +187,103 @@ export function App() {
     {copilot&&<aside className="copilot-panel"><div><span><Sparkle/></span><section><b>مساعد المخازن</b><small>إجابات من بيانات النظام</small></section><button aria-label="إغلاق المساعد" onClick={()=>setCopilot(false)}><X/></button></div><p>لديك <b>18 صنفًا</b> تحت حد إعادة الطلب، و<b>12 مستندًا</b> في دورة الاعتماد.</p><div className="quick-asks"><button onClick={()=>setPage("balances")}>اعرض المخزون الحرج</button><button onClick={()=>setPage("approvals")}>ما الاعتمادات المعلقة؟</button><button onClick={()=>setPage("ledger")}>آخر حركات المخزون</button></div><small className="source">المصدر: أرصدة المخزون • سجل المستندات</small></aside>}
     {toast&&<div className="toast" role="status"><CheckCircle/>{toast}</div>}
   </div>;
+}
+
+const STORE_KEY = "wareflow_static_store_v1";
+const adminUser = { id:1, name:"مدير النظام", phone:"01023299755", email:"admin@wareflow.local", role:"SUPER_ADMIN", active:true };
+const roleCatalog = [
+  {code:"SUPER_ADMIN",permissions:["كل الصلاحيات","إدارة المستخدمين","اعتماد المستندات","التقارير"]},
+  {code:"WAREHOUSE_MANAGER",permissions:["المخزون","التحويلات","الاعتمادات"]},
+  {code:"STORE_KEEPER",permissions:["أذون الإضافة","أذون الصرف","الأرصدة"]},
+  {code:"QC_INSPECTOR",permissions:["فحص الجودة","الحجر الصحي","تقارير الجودة"]},
+  {code:"FINANCE",permissions:["اعتماد مالي","قيمة المخزون","التقارير"]},
+  {code:"AUDITOR",permissions:["عرض فقط","سجل التدقيق","التقارير"]},
+];
+function loadStore() {
+  const saved = localStorage.getItem(STORE_KEY);
+  if (saved) return JSON.parse(saved);
+  const store = { users:[adminUser], documents: docs.map((d,i)=>({...d,id:i+1})), qc: [], transfers: [], seq:{doc:129,qc:1,transfer:1,user:2} };
+  saveStore(store);
+  return store;
+}
+function saveStore(store) { localStorage.setItem(STORE_KEY, JSON.stringify(store)); }
+function readBody(options) { try { return JSON.parse(options.body || "{}"); } catch { return {}; } }
+function requireUser() {
+  const token = localStorage.getItem("wareflow_token");
+  if (!token) throw new Error("يجب تسجيل الدخول أولًا");
+  return loadStore().users.find(u => u.active) || adminUser;
+}
+async function localApi(path, options={}) {
+  await new Promise(resolve => setTimeout(resolve, 80));
+  const method = (options.method || "GET").toUpperCase();
+  const store = loadStore();
+  if (path === "/auth/login" && method === "POST") {
+    const body = readBody(options);
+    const user = store.users.find(u => u.active && (u.phone === body.identifier || u.email === body.identifier));
+    if (!user || body.password !== "01023299755") throw new Error("بيانات الدخول غير صحيحة");
+    return { token:`static-${Date.now()}`, user };
+  }
+  if (path === "/me") return requireUser();
+  if (path === "/documents" && method === "GET") return store.documents;
+  if (path === "/documents" && method === "POST") {
+    const body = readBody(options);
+    const doc = { id:Date.now(), no:`GRN-2026-${String(store.seq.doc++).padStart(6,"0")}`, status:"بانتظار الجودة", ...body };
+    store.documents.unshift(doc); saveStore(store); return doc;
+  }
+  const decision = path.match(/^\/documents\/(.+)\/decision$/);
+  if (decision && method === "PATCH") {
+    const body = readBody(options);
+    const doc = store.documents.find(d => String(d.id) === decision[1]);
+    if (!doc) throw new Error("المستند غير موجود");
+    doc.status = body.status; saveStore(store); return doc;
+  }
+  if (path === "/qc" && method === "GET") return store.qc;
+  if (path === "/qc" && method === "POST") {
+    const body = readBody(options);
+    const q = { id:Date.now(), documentNo:`QC-2026-${String(store.seq.qc++).padStart(4,"0")}`, result:"بانتظار الفحص", inspector:"مسؤول الجودة", createdAt:new Date().toISOString(), ...body };
+    store.qc.unshift(q);
+    store.documents.unshift({ id:Date.now()+1, no:`GRN-2026-${String(store.seq.doc++).padStart(6,"0")}`, type:"إذن إضافة", party:"فحص الجودة", warehouse:q.warehouse, date:new Date().toLocaleDateString("ar-EG"), value:0, status:"بانتظار الجودة" });
+    saveStore(store); return q;
+  }
+  const qcDecision = path.match(/^\/qc\/(.+)$/);
+  if (qcDecision && method === "PATCH") {
+    const body = readBody(options);
+    const q = store.qc.find(x => String(x.id) === qcDecision[1]);
+    if (!q) throw new Error("طلب الجودة غير موجود");
+    q.result = body.result === "ACCEPTED" ? "مقبول" : body.result === "QUARANTINE" ? "حجر صحي" : body.result === "REJECTED" ? "مرفوض" : body.result;
+    q.inspectedAt = new Date().toISOString();
+    saveStore(store); return q;
+  }
+  if (path === "/transfers" && method === "GET") return store.transfers;
+  if (path === "/transfers" && method === "POST") {
+    const body = readBody(options);
+    if (body.fromWarehouse === body.toWarehouse) throw new Error("لا يمكن التحويل لنفس المخزن");
+    const transfer = { id:Date.now(), transferNo:`TRF-2026-${String(store.seq.transfer++).padStart(5,"0")}`, status:"مسودة", createdAt:new Date().toISOString(), ...body };
+    store.transfers.unshift(transfer);
+    store.documents.unshift({ id:Date.now()+2, no:transfer.transferNo, type:"تحويل مخزني", party:transfer.toWarehouse, warehouse:transfer.fromWarehouse, date:new Date().toLocaleDateString("ar-EG"), value:0, status:"بانتظار الصرف" });
+    saveStore(store); return transfer;
+  }
+  const transferStatus = path.match(/^\/transfers\/(.+)\/status$/);
+  if (transferStatus && method === "PATCH") {
+    const body = readBody(options);
+    const transfer = store.transfers.find(x => String(x.id) === transferStatus[1]);
+    if (!transfer) throw new Error("التحويل غير موجود");
+    transfer.status = body.status === "IN_TRANSIT" ? "في الطريق" : body.status === "RECEIVED" ? "تم الاستلام" : body.status === "CANCELLED" ? "ملغي" : body.status;
+    saveStore(store); return transfer;
+  }
+  if (path === "/users" && method === "GET") return store.users;
+  if (path === "/roles" && method === "GET") return roleCatalog;
+  if (path === "/users" && method === "POST") {
+    const body = readBody(options);
+    const user = { id:store.seq.user++, active:true, email:"", ...body };
+    store.users.push(user); saveStore(store); return user;
+  }
+  const userPatch = path.match(/^\/users\/(.+)$/);
+  if (userPatch && method === "PATCH") {
+    const body = readBody(options);
+    const user = store.users.find(u => String(u.id) === userPatch[1]);
+    if (!user) throw new Error("المستخدم غير موجود");
+    Object.assign(user, body); saveStore(store); return user;
+  }
+  throw new Error("هذا الجزء غير متاح في النسخة السهلة");
 }
